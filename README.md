@@ -8,7 +8,7 @@ Collaboration and Sources: These are the sources that we refer to in the process
 
  * For data description: https://www.kaggle.com/c/shelter-animal-outcomes
  * For data cleaning: https://www.kaggle.com/mrisdal/quick-dirty-randomforest#
- * For Random Forest: Prof. Ray's hand-outs, lecture notes and ffice hours
+ * For Random Forest: Prof. Ray's hand-outs, lecture notes and office hours
  * For SVM: 
       - “An Introduction to Statistical Learning with Applications in R” (ISLR) by James, Witten, Hastie, and Tibshirani
       - https://www.youtube.com/watch?v=efR1C6CvhmE
