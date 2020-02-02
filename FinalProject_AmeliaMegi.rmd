@@ -1,0 +1,506 @@
+---
+title: "Stat 34o: Final Project"
+author: "Amelia and Megi"
+date: "12/11/2019"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r, warning=FALSE, message=FALSE}
+# load packages
+library(readr)
+library(gridExtra)
+library(ggplot2) 
+library(ggthemes)
+library(dplyr) 
+library(lubridate) 
+library(rpart) 
+library(caret)
+library(GGally)
+library(gridExtra)
+library(purrr)
+library(e1071)
+library(randomForest)
+```
+
+# Motivation:
+According to the description from Shelter Animal Outcomes on Kaggle, “every year, approximately 7.6 million companion animals end up in US shelters as a result of owners giving them up or they are picked up out of cruelty situations such as abandoned by their owners or from getting lost. Many of these animals get adopted by other families however, about 2.7 million dogs and cats are euthanized in the US every year.” With this dataset we are going to run some statistical analysis to investigate on what affects the animal outcomes and what we can do to improve their shelter outcome and help them get adopted. 
+
+```{r}
+# read data
+animals <- read.csv("data/train.csv")
+head(animals)
+num_obs <- nrow(animals)
+levels(animals$OutcomeSubtype)
+```
+
+# Description of the data source:
+
+According to the Quick and Dirty Random Forest notebook on Kaggle, the data comes from Austin Animal Center from October 1st, 2013 to March, 2016. There are 10 explanatory variables: unique Animal ID, Names, Data/Time, Animal Types, Outcome Subtype, Sex upon Outcome, Age upon Outcome, Breed and Color for 26729 corresponding animals. The response variable is Outcome Types. 
+
+Explanatory Variables:
+
+  * `Animal ID` - the unique ID animales received during intake
+  * `Names` - their given names when taken to the Animal Center (somes animals don't have names) 
+  * `Data/Time` - the specific time the animal arrived at the Animal Center
+  * `Animal Types` - cat or dog
+  * `Outcome Subtype` - animal subtypes 
+  * `Age upon Outcome` - animals' ages upon the outcome
+  * `Sex upon Outcome` - animal's sex status upon the outcome
+
+Response Variable:
+
+  * `Outcome Types` represent the status of animals as they leave the Animal Center. These outcomes include: Adoption, Died, Euthanasia, Return to owner, and Transfer.
+
+In this problem, we fit random forest and support vector machine models with `Outcome Types` as the response variable. 
+
+# Data Cleanup:
+Our code for data cleanup is adapted from the code in Quick and Dirty Random Forest notebook by Megan Risdal.
+
+## AnimalID Outcome Subtype:
+```{r}
+dim(animals)
+str(animals)
+```
+Since each animal has unique AnimalID, there are 26729 levels of ID's corresponding to each animal. Thus, I decide to not include this variable in the model. Outcome subtype with 17 levels is not clearly defined. It is difficult to extract information from this variable. Thus, we decide to exclude this one also.
+
+# Name Variable:
+Animals have different names and some don't have any name when arriving at the Animal Center. For this variable, we change it into a categorical variable with 2 levels: 1 if the animal has Name and 0 if they don't.
+
+```{r}
+# Replace blank names with "Nameless"
+name_character <- as.character(animals$Name)
+animals$Name <- ifelse(nchar(name_character) == 0, 'Nameless', as.character(animals$Name))
+
+# Make a name v. no name variable
+animals$HasName[animals$Name == 'Nameless'] <- 0
+animals$HasName[animals$Name != 'Nameless'] <- 1
+animals$HasName <- factor(animals$HasName)
+```
+
+## DayTime Variable:
+The DayTime variable contains the specific time the animal arrived at the Animal Center. I change this variable into a categorical one with 4 levels: morning, midday, lateday, night. 
+```{r}
+# Extract time variables from date (uses the "lubridate" package)
+animals$Hour    <- hour(animals$DateTime)
+animals$Weekday <- wday(animals$DateTime)
+animals$Month   <- month(animals$DateTime)
+animals$Year    <- year(animals$DateTime)
+
+# Time of day may also be useful
+animals$TimeofDay <- ifelse(animals$Hour > 5 & animals$Hour < 11, 'morning',
+                  ifelse(animals$Hour > 10 & animals$Hour < 16, 'midday',
+                  ifelse(animals$Hour > 15 & animals$Hour < 20, 'lateday', 'night')))
+animals$TimeofDay <- factor(animals$TimeofDay)
+```
+
+## SexuponOutcome Variable:
+I make a distinction between animal sex and intactness extracting from the SexuponOutcome variable. These are two distinctive features: Intact (Yes/No/Unknown) and Sex (Male/Female/Unknown)
+
+```{r}
+# Use "grepl" to look for "Intact"
+animals$Intact <- ifelse(grepl('Intact', animals$SexuponOutcome), 1,
+               ifelse(grepl('Unknown', animals$SexuponOutcome), 'Unknown', 0))
+
+# Use "grepl" to look for sex
+animals$Sex <- ifelse(grepl('Male', animals$SexuponOutcome), 'Male',
+            ifelse(grepl('Unknown', animals$Sex), 'Unknown', 'Female'))
+animals$Intact <- factor(animals$Intact)
+animals$Sex <- factor(animals$Sex)
+```
+
+## AgeUponOutcome Variable:
+The AgeuponOutcome variable is not in a format that is easily usable since it has 46 levels. 
+Thus, I use strsplit to break it up into two parts: the numeric value and its unit of time (i.e., days, weeks, months, and years). I’m also going to rip off the final “s” from everything (i.e., day versus days) so that we’re left with just four levels of a new factor variable. 
+
+```{r}
+# Convert to chracter 
+animals$AgeuponOutcome <- as.character(animals$AgeuponOutcome)
+# Get the time value:
+animals$TimeValue <- sapply(animals$AgeuponOutcome,  
+                      function(x) strsplit(x, split = ' ')[[1]][1])
+# Now get the unit of time:
+animals$UnitofTime <- sapply(animals$AgeuponOutcome,  
+                      function(x) strsplit(x, split = ' ')[[1]][2])
+# Fortunately any "s" marks the plural, so we can just pull them all out
+animals$UnitofTime <- gsub('s', '', animals$UnitofTime)
+animals$TimeValue  <- as.numeric(animals$TimeValue)
+animals$UnitofTime <- as.factor(animals$UnitofTime)
+```
+Now we have our time values and our units of time, we need to get the animals’ ages as measured by a common unit. I use chained ifelse statements to convert everything into days. 
+
+```{r}
+# Make a multiplier vector
+multiplier <- ifelse(animals$UnitofTime == 'day', 1,
+              ifelse(animals$UnitofTime == 'week', 7,
+              ifelse(animals$UnitofTime == 'month', 30, # Close enough
+              ifelse(animals$UnitofTime == 'year', 365, NA))))
+
+# Apply our multiplier
+animals$AgeinDays <- animals$TimeValue * multiplier
+summary(animals$AgeinDays)
+```
+The new variable is named `AgeinDays`.
+
+## Breed Variable:
+```{r}
+levels(factor(animals$Breed))[1:10]
+```
+Since the Breed variable has way too many levels; 1380 to be exact, I extrat two variables: IsMix (Yes/No) by contrasting mixes with non-mixes, and SimpleBreed which only contains the first breed for each animal. 
+
+```{r}
+# Use "grepl" to look for "Mix"
+animals$IsMix <- ifelse(grepl('Mix', animals$Breed), 1, 0)
+# Remove "Mix" and split on "/" and remove " Mix" to simplify Breed
+animals$SimpleBreed <- sapply(animals$Breed, 
+                      function(x) gsub(' Mix', '', strsplit(as.character(x), split = '/')[[1]][1]))
+animals$IsMix <- factor(factor(animals$IsMix))
+animals$SimpleBreed <- factor(factor(animals$SimpleBreed))
+   
+# check the simplified breeds
+levels(animals$SimpleBreed)[1:10]
+str(animals$SimpleBreed)
+```
+Now there are only 220 levels of Simple Breed. Compared to the original Breed variable with 1678 levels, it is easier and simpler to analyze the data. 
+
+## Color Variable:
+There are 366 unique colors. Color is simplified and the new SimpleColor only contains the first color for each animal.
+```{r}
+# Use strsplit to grab the first color
+animals$SimpleColor <- sapply(animals$Color, 
+                      function(x) strsplit(as.character(x), split = '/| ')[[1]][1])
+animals$SimpleColor <- factor(animals$SimpleColor)
+# check the simplified colors
+levels(animals$SimpleColor)
+str(factor(animals$SimpleColor))
+```
+Now there are only 29 distinct colors for the animals.
+
+### Missing data check:
+```{r}
+for (i in seq_len(ncol(animals))) {
+  print(names(animals[i]))
+  print(sum(is.na(animals[[i]])))
+}
+```
+
+## Impute missing values with median
+There are 18 NA's for AgeinDays variable. Since it is continuous, I impute the missing data values with the median age among the animals. 
+```{r}
+for (i in seq_len(nrow(animals))) {
+  if (is.na(animals$AgeinDays[[i]])) {
+    animals$AgeinDays[[i]] <- median(animals$AgeinDays, na.rm = TRUE)
+  }
+}
+# median(animals$AgeinDays, na.rm = TRUE): 365
+# sum(is.na(animals$AgeinDays)): 0
+```
+## Adding a new variable: Lifestage
+It is noticeable that there is a distinct difference between baby animals and adult or full grown animals. I use 365 days as the cut-off to create a new Lifestage variable with 2 levels: baby and adult.
+
+```{r}
+# Use the age variable to make a puppy/kitten variable
+animals$Lifestage[animals$AgeinDays < 365] <- 'baby'
+animals$Lifestage[animals$AgeinDays >= 365] <- 'adult'
+animals$Lifestage <- factor(animals$Lifestage)
+
+head(animals)
+str(animals)
+```
+After a deep data cleanup, here is the summary of the data Animals with new variables:
+
+Explanatory Variables:
+
+  * `HasName` - categorical with 2 levels Yes/No
+  * `TimeofDay` - categorical with 4 levels: morning, midday, lateday, night
+  * `Animal Types` - categorical with 2 levels Cat/Dog
+  * `Intact` - cateforical with 3 levels Yes/No/Unknown
+  * `Sex` - cateogorical with 3 levels Male/Female/Unknown
+  * `AgeinDays` - animals' ages in the common unit of days upon the outcome
+  * `IsMix ` - categorical with 2 levels Yes/No
+  * `SimpleBreed` - categorical with 220 levels
+  * `SimpleColor` - categorical with 29 levels corresponding to distinct colors
+  * `LifeStage` - categorical with 2 levels adult/baby
+
+Response Variable:
+
+  * `OutcomeType` - categorical with  5 levels Adoption, Died, Euthanasia, Return_to_owner, Transfer
+
+### Data Exploration:
+
+```{r}
+# pair plot
+animals %>% 
+  select(c("AgeinDays", "HasName", "TimeofDay", "IsMix", "AnimalType", "Sex", "Intact","OutcomeType")) %>%
+  ggpairs()
+```
+
+Since pair plots are not easy to see, I make exploratory plots to see if any explanatory variable makes a difference in the outcome of the animals.
+
+The code for data exploration below is also adapted from the code in Quick and Dirty Random Forest notebook by Megan Risdal.
+
+## `Animal Type ` is a significant factor?
+
+```{r}
+outcomes <- animals[1:num_obs, ] %>%
+  group_by(AnimalType, OutcomeType) %>%
+  summarise(num_animals = n())
+
+ggplot(outcomes, aes(x = AnimalType, y = num_animals, fill = OutcomeType)) +
+  geom_bar(stat = 'identity', position = 'fill', colour = 'black') +
+  coord_flip() +
+  labs(y = 'Proportion of Animals', 
+       x = 'Animal Type',
+       title = 'Outcomes by Animal Type: Cats & Dogs') 
+```
+
+## `TimeofDay` is a significant factor?
+
+```{r}
+daytimes <- animals[1:num_obs, ] %>%
+  group_by(AnimalType, TimeofDay, OutcomeType) %>%
+  summarise(num_animals = n())
+
+ggplot(daytimes, aes(x = TimeofDay, y = num_animals, fill = OutcomeType)) +
+  geom_bar(stat = 'identity', position = 'fill', colour = 'black') +
+  facet_wrap(~AnimalType) +
+  coord_flip() +
+  labs(y = 'Proportion of Animals', 
+       x = 'Time of Day ',
+       title = 'Outcomes by Time of Day: Cats & Dogs')
+```
+
+## `Intact` makes any difference in the outcome?
+```{r}
+intact <- animals[1:num_obs, ] %>%
+  group_by(AnimalType, Intact, OutcomeType) %>%
+  summarise(num_animals = n())
+
+# Plot
+ggplot(intact, aes(x = Intact, y = num_animals, fill = OutcomeType)) +
+  geom_bar(stat = 'identity', position = 'fill', colour = 'black') +
+  facet_wrap(~AnimalType) +
+  coord_flip() +
+  labs(y = 'Proportion of Animals', 
+       x = 'Animal Intactness',
+       title = 'Outcomes by Intactness: Cats & Dogs')
+
+```
+
+## `IsMix` and `Sex`?
+
+```{r}
+animal_sex <- animals[1:num_obs, ] %>%
+  group_by(IsMix, Sex, OutcomeType) %>%
+  summarise(num_animals = n())
+
+# Plot
+ggplot(animal_sex, aes(x = Sex, y = num_animals, fill = OutcomeType)) +
+  geom_bar(stat = 'identity', position = 'fill', colour = 'black') +
+  facet_wrap(~IsMix) +
+  coord_flip() +
+  labs(y = 'Proportion of Animals with respect to Breed Mix', 
+       x = 'Animal Sex',
+       title = 'Outcomes by Animal Sex: Cats & Dogs')
+```
+
+## `Simple Color ` is a significant factor?
+```{r}
+color <- animals[1:num_obs, ] %>%
+  group_by(AnimalType, SimpleColor, OutcomeType) %>%
+  summarise(num_animals = n())
+
+# Plot
+ggplot(color, aes(x = SimpleColor, y = num_animals, fill = OutcomeType)) +
+  geom_bar(stat = 'identity', position = 'fill', colour = 'black') +
+  facet_wrap(~ AnimalType) +
+  coord_flip() +
+  labs(y = 'Proportion of Animals', 
+       x = 'Animal Color',
+       title = 'Outcomes by Intactness: Cats & Dogs')
+```
+
+
+## `Lifestage` has any impact on the outcome?
+
+```{r}
+ggplot(animals[1:num_obs, ], aes(x = Lifestage, fill = OutcomeType)) + 
+  geom_bar(position = 'fill', colour = 'black') +
+  labs(y = 'Proportion of Animals', 
+       x = 'Lifestage',
+       title = 'Animal Outcome: Babies versus Adults')
+```
+
+## Plot `Age in Days` - the only quantitative variable
+
+```{r}
+animal_age <- animals[1:num_obs, ] %>%
+  group_by(AnimalType, AgeinDays, OutcomeType) %>%
+  summarise(num_animals = n())
+
+ggplot(animal_age, aes(x = AgeinDays, y = num_animals, col = OutcomeType)) +
+  facet_wrap(~AnimalType) +
+  geom_line(size = 1, alpha = 0.8) +
+  labs(y = 'Proportion of Animals',
+        x = 'Age In Days',
+        title = 'Outcomes by Age: Cats & Dogs')
+```
+
+## In-class method: Random Forest
+```{r}
+# Initial train/test split ("estimation"/test) and cross-validation folds
+
+set.seed(8348)
+train_inds <- createDataPartition(
+    y = animals$OutcomeType, # response variable as a vector
+    p = 0.8 # approximate proportion of data used for training and validation
+)
+animals_train <- animals %>% slice(train_inds[[1]])
+animals_test <- animals %>% slice(-train_inds[[1]])
+
+crossval_val_fold_inds <- createFolds(
+  y = animals_train$OutcomeType, # response variable as a vector
+  k = 10 # number of folds for cross-validation
+)
+get_complementary_inds <- function(x) {
+  return(seq_len(nrow(animals_train))[-x])
+}
+
+crossval_train_fold_inds <- map(crossval_val_fold_inds, get_complementary_inds)
+```
+
+### Fit random forest model to the training data.  Use cross-validation to select the value of mtry; make a plot of mtry vs. RMSE.  Find the test set performance for the random forest.
+```{r}
+# fit all variables with sample of 5000 observations
+sample <- animals[sample(nrow(animals), 5000), ]
+
+rf_fit <- train(
+  form = OutcomeType ~ TimeofDay + Intact + Sex + AgeinDays + AnimalType + Lifestage + IsMix + SimpleBreed + SimpleColor + HasName,
+  data = sample,
+  method = "rf",
+  trControl = trainControl(method = "oob"),
+  tuneLength = 1
+)
+```
+
+## Variable Importance 
+```{r}
+# importance(rf_fit$finalModel, type = 2)
+varImpPlot(rf_fit$finalModel, type = 2)
+```
+
+The measure of variable importance based on the mean decrease of Gini index shows that `AgeinDays`and `Intact` are the most important independent variables. 
+
+`Sex`, `HasName`, `LifeStage`, `IsMix`, and `AnimalType` have 2 levels. `Color` will be reduced to 3 categories: Black, Brown, and White. `TimeofDay` to 2 levels midday and morning. 
+
+```{r}
+# data modification
+animals_train$TimeofDay_reduced <- ifelse(grepl('morning', animals_train$TimeofDay), 'morning',
+                            ifelse(grepl('midday', animals_train$TimeofDay), 'midday', 'other'))
+
+animals_test$TimeofDay_reduced <- ifelse(grepl('morning', animals_test$TimeofDay), 'morning',
+                            ifelse(grepl('midday', animals_test$TimeofDay), 'midday', 'other'))
+
+animals_train$Color_reduced <- ifelse(grepl('Black', animals_train$Color), 'Black',
+                          ifelse(grepl('Brown', animals_train$Color), 'Brown',
+                          ifelse(grepl('White', animals_train$Color), 'White', 'other')))
+ 
+animals_test$Color_reduced <- ifelse(grepl('Black', animals_test$Color), 'Black',
+                          ifelse(grepl('Brown', animals_test$Color), 'Brown',
+                          ifelse(grepl('White', animals_test$Color), 'White', 'other')))
+
+# random forest model
+rf_fit_var <- train(
+  form = OutcomeType ~ TimeofDay_reduced + Intact + Sex + AgeinDays + AnimalType + Lifestage + IsMix + HasName + Color_reduced,
+  data = animals_train,
+  method = "rf",
+  trControl = trainControl(method = "oob",
+    number = 10,
+    index = crossval_train_fold_inds,
+    indexOut = crossval_val_fold_inds, 
+    returnResamp = "all",
+    savePredictions = TRUE),
+  tuneLength = 10
+)
+
+# plot of the results of cross-validation for mtry
+ggplot(data = rf_fit_var$results, mapping = aes(x = mtry, y = Accuracy)) +
+  geom_line() +
+  geom_vline(xintercept = rf_fit_var$bestTune$mtry)
+
+# test-set performance 
+y_hats <- predict(rf_fit_var, newdata = animals_test)
+rf_mce <- mean(y_hats != animals_test$OutcomeType)
+rf_mce
+```
+
+## Out-of-class method: Support Vector Machine
+
+The code is adapted from ISLR – 9.6: Lab: Support Vector Machines by James, Witten, Hastie, and Tibshirani.
+
+```{r}
+set.seed(1234)
+
+# cross validation to pick best cost and gamma
+# tune_out <- tune(svm,
+#       OutcomeType ~ TimeofDay_reduced + Intact + Sex + AgeinDays + AnimalType + Lifestage + IsMix + HasName + Color_reduced,
+#       data = animals_train %>% select(OutcomeType, TimeofDay_reduced, Intact, Sex, AgeinDays, AnimalType, Lifestage, IsMix, HasName, Color_reduced),
+#       kernel = "radial",
+#       ranges = list(cost = c(0.1,1,10,100,1000),
+#       gamma = c(0.5,1,2,3,4))
+# )
+# 
+# bestmod <- tune_out$best.model
+# summary(bestmod)
+# plot(bestmod, animals_train)
+# y_hats <- predict(bestmod, newdata = animals_test %>% select(OutcomeType, TimeofDay_reduced, Intact, Sex, AgeinDays, AnimalType, Lifestage, IsMix, HasName, Color_reduced))
+# table(animals_test$OutcomeType, y_hats)
+
+# svm with gamma 1 and cost 1
+svm_fit <- svm(
+  formula = OutcomeType ~ TimeofDay_reduced + Intact + Sex + AgeinDays + AnimalType + Lifestage + IsMix + HasName + Color_reduced,
+  data = animals_train %>% select(OutcomeType, TimeofDay_reduced, Intact, Sex, AgeinDays, AnimalType, Lifestage, IsMix, HasName, Color_reduced),
+  kernel = 'radial',
+  gamma = 1,
+  cost = 1,
+  scale = FALSE
+)
+
+summary(svm_fit)
+y_preds <- predict(svm_fit, newdata = animals_test %>% 
+      select(OutcomeType, TimeofDay_reduced, Intact, Sex, AgeinDays, AnimalType, Lifestage, IsMix, HasName, Color_reduced))
+
+# confusion matrix
+conf_matrix <- table(animals_test$OutcomeType, y_preds) 
+conf_matrix
+
+# test-set perfomance
+svm_mce <- 1 - sum(diag(conf_matrix))/length(y_preds)
+svm_mce
+```
+
+# Collaboration and Sources
+
+These are the sources (including our text book) that we refer to in the process of doing this project:
+
+ * For data description: https://www.kaggle.com/c/shelter-animal-outcomes
+ * For data cleaning: https://www.kaggle.com/mrisdal/quick-dirty-randomforest#
+ * For Random Forest: Prof. Ray's hand-outs, lecture notes and ffice hours
+ * For SVM: 
+      - “An Introduction to Statistical Learning with Applications in R” (ISLR) by James, Witten, Hastie, and Tibshirani
+      - https://www.youtube.com/watch?v=efR1C6CvhmE
+      - https://towardsdatascience.com/support-vector-machine-simply-explained-fee28eba5496
+            
+ 
+
